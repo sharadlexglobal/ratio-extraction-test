@@ -1,16 +1,30 @@
 #!/bin/sh
-# Phase 4: the last three small cupboards, so nothing at all is lost when the old warehouse goes.
-if [ -f /tmp/rest_done ]; then echo "already copied in this container — idling"; sleep infinity; fi
-echo "=== LAST CUPBOARDS START $(date -u +%H:%M:%S) ==="
-psql "$DEST" -c "create extension if not exists vector; create extension if not exists pg_trgm;" 2>&1 | tail -2
+# Phase 5: copy the whole live `litigants` room (leadgen) to the new warehouse.
+# This is a SNAPSHOT — the room is still being written to. The small mutable
+# tables get re-copied fresh at cutover; court_rules_chunks is static.
+if [ -f /tmp/lit_done ]; then echo "litigants already copied in this container — idling"; sleep infinity; fi
+
+echo "=== LITIGANTS COPY START $(date -u +%H:%M:%S) ==="
+psql "$DEST" -c "create extension if not exists vector;" 2>&1 | tail -1
+
+echo "--- at source ---"
+psql "$SRC" -c "select relname, n_live_tup from pg_stat_user_tables
+                 where schemaname='litigants' order by relname" 2>&1
+
 pg_dump "$SRC" --no-owner --no-acl --no-comments --clean --if-exists \
-  -t public.crunchbase_india -t public.apollo_india_orgs -t public.court_rules_chunks \
+  --schema=litigants \
   | psql "$DEST" -v ON_ERROR_STOP=1 -q
 RC=$?
 if [ $RC -ne 0 ]; then echo "=== FAILED (exit $RC) $(date -u +%H:%M:%S) ==="; sleep 300; exit $RC; fi
+
 echo "=== COPY DONE $(date -u +%H:%M:%S) ==="
-psql "$DEST" -c "select relname, n_live_tup as rows, pg_size_pretty(pg_total_relation_size(relid)) as size from pg_stat_user_tables order by n_live_tup desc"
-psql "$DEST" -c "select pg_size_pretty(pg_database_size(current_database())) as total_used"
+psql "$DEST" -c "analyze;" 2>&1 | tail -1
+psql "$DEST" -c "select relname, n_live_tup as rows, pg_size_pretty(pg_total_relation_size(relid)) as size
+                   from pg_stat_user_tables where schemaname='litigants' order by relname"
+psql "$DEST" -c "select i.relname as index_name, x.indisvalid as valid
+                   from pg_class i join pg_index x on x.indexrelid=i.oid
+                   join pg_namespace n on n.oid=i.relnamespace
+                  where n.nspname='litigants' order by 1"
 echo "=== ALL DONE $(date -u +%H:%M:%S) ==="
-touch /tmp/rest_done
+touch /tmp/lit_done
 sleep infinity
